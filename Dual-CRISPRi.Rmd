@@ -126,20 +126,9 @@ In total, 378'015 unique combinations
 ## Input
 
 ```{r input}
-raw869 <- read.csv2("raw869_NextSeq_NovaSeq.csv", sep=",", header=T, row.names=1)
+raw869 <- read.csv2("Read Counts/raw869_NextSeq_NovaSeq.csv", sep=",", header=T, row.names=1)
 
-
-
-```
-
-
-## DESeq2
-
-```{r}
-
-
-#Adding together Lanes from Novaseq
-
+#Aggregating the lanes for each replicate
 raw869_noLane <- melt(raw869) %>%
   separate('variable', into=c("Sequencer", "Treatment", "Replicate", "Lane"), sep="[_]")
 
@@ -150,6 +139,16 @@ raw869_noLane <- dcast(raw869_noLane, SG1+SG2~Sequencer+Treatment+Replicate)
 
 raw869_ref <- raw869_noLane[raw869_noLane$SG1 == raw869_noLane$SG2,]
 raw869_comb <- raw869_noLane[raw869_noLane$SG1 != raw869_noLane$SG2,]
+
+
+
+```
+
+
+## DDS Object
+
+```{r}
+
 
 
 raw869_colData <- data.frame(s=colnames(raw869_noLane[3:14]), row.names=colnames(raw869_noLane[3:14])) %>%
@@ -169,6 +168,17 @@ DDS_old_single <- DESeqDataSetFromMatrix(countData = raw869_ref[-c(1,2)],
                                   design = ~ Treatment + Sequencer) %>%
   estimateSizeFactors()
 
+
+
+
+```
+
+## DESeq2
+
+```{r}
+
+
+#Adding together Lanes from Novaseq
 
 
 alpha <- 0.05
@@ -193,7 +203,6 @@ df_old_res_shr$SG1.targets <- D39V_targets$Gene.Name[match(df_old_res_shr$SG1, D
 df_old_res_shr$SG2.targets <- D39V_targets$Gene.Name[match(df_old_res_shr$SG2, D39V_targets$sgRNA)]
 
 
-df_old_res_shr$tot <- df_old_res_shr$SG1.refLog2FC + df_old_res_shr$SG2.refLog2FC
 
 
 
@@ -210,11 +219,11 @@ df_old_res_shr$SG2.refLog2FC <- df_old_single_res_shr$log2FoldChange[match(df_ol
 df_old_res_shr$SG2.reflfcSE <- df_old_single_res_shr$lfcSE[match(df_old_res_shr$SG2, df_old_single_res_shr$sgRNA)]
 df_old_res_shr$SG2.refpadj <- df_old_single_res_shr$padj[match(df_old_res_shr$SG2, df_old_single_res_shr$sgRNA)]
 
+df_old_res_shr$tot <- df_old_res_shr$SG1.refLog2FC + df_old_res_shr$SG2.refLog2FC
 
 
 #E(Wxy) = Wx+Wy #better for negative calling
 df_old_res_shr <- transform(df_old_res_shr, expectedSum=SG1.refLog2FC+SG2.refLog2FC)
-
 
 
 
@@ -229,16 +238,16 @@ df_old_res_shr <- df_old_res_shr %>% mutate(
 
 
 
+
 #hit calling
-tmp <- df_old_res_shr %>% mutate(
+df_old_res_shr <-df_old_res_shr %>% mutate(
   interactionSum = 
     case_when(
-                       (epsilonSum < -1 & baseMean > 10 & padj < 0.05 & SG1.refLog2FC > -5 & SG2.refLog2FC > -5) ~ "Negative", 
+                       (epsilonSum < -1 & padj < 0.05 & SG1.refLog2FC > -5 & SG2.refLog2FC > -5) ~ "Negative", 
                        (epsilonSum > 1 & baseMean > 10 & padj > alpha) ~ "Positive",
                        TRUE ~ "Neutral"
                                )
 )
-  
 
 
 df_old_res_shr$Group <- factor(df_old_res_shr$interactionSum, levels=c("Positive", "Neutral", "Negative", "Synthetic Lethal"))
@@ -256,7 +265,8 @@ df_old_res_shr <- df_old_res_shr %>%
 
 ```
 
-# Mini Dual CRISPRi-Seq Analysis
+
+#14x1499 Dual Library Analysis
 
 ## Input
 
@@ -268,11 +278,9 @@ sgRNAList <- c(
   "sgRNA870","sgRNA1029","sgRNA1357","sgRNA1500"
 )
 
-rawMini <- read.csv2("NovaSeq_rc_1-2-3Mis.csv", sep=",")
-rawMini <- rawMini[which(rawMini$SG1 %in% sgRNAList | rawMini$SG2 %in% sgRNAList),c(1,2,13:28)]
+rawMini <- read.csv2("Read Counts/raw19x1499_NovaSeq.csv", sep=",")
 
-colnames(rawMini) <- c("SG1", "SG2", paste(rep(c("NoIPTG", "WithIPTG"), each=8, times=1), rep(c(1,2,3,4), each=2, times=2), rep(c("L1", "L2"), each=1, times=8), sep="_"))
-
+#Aggregating the lanes for each replicate
 rawMini <- separate(melt(rawMini), variable, into=c("Treatment", "Repl", "Lane"), sep="[_]")
 rawMini <- aggregate(.~SG1+SG2+Treatment+Repl, rawMini[-c(5)], sum)
 rawMini <- dcast(rawMini, SG1+SG2~Treatment+Repl)
@@ -285,7 +293,6 @@ rawMini <- dcast(rawMini, SG1+SG2~Treatment+Repl)
 We are creating a formated dataframe, with 19 \* conditions columns
 
 ```{r message=FALSE, cache=TRUE, list(width.cutoff=60), tidy=TRUE, tidy.opts=list(width.cutoff=60)}
-
 
 rawMini_format <- data.frame(row.names=paste0("sgRNA", 1:1499))
 
@@ -394,58 +401,18 @@ df_mini_ref$targets <- D39V_targets$Gene.Name[match(df_mini_ref$sgRNA, D39V_targ
 df_mini$bg.targets <- D39V_targets$Gene.Name[match(df_mini$Background, D39V_targets$sgRNA)]
 df_mini$targets <- D39V_targets$Gene.Name[match(df_mini$sgRNA, D39V_targets$sgRNA)]
 
-
-
-
-
-```
-
-
-# Network for PneumoGIN
-
-```{r}
-
-edges <- df_old_res_shr %>%
-  select(c(epsilonSum, SG1, SG2, Group, targets)) %>%
-  filter(Group != "Neutral") %>%
-  # filter(!grepl("tarQ|gtrB|glmU|cps2O|trmB|lysS|prs2|divIVA|pulA|rpe|miaA", targets)) %>%
-  filter(epsilonSum > 1 | epsilonSum < -1) %>%
-  dplyr::rename(from = SG1) %>%
-  dplyr::rename(to = SG2)
-
-
-nodes <- data.frame(id=unique(c(as.character(edges$from), as.character(edges$to))))
-nodes$label <- D39V_targets$Gene.Name[match(nodes$id, D39V_targets$sgRNA)]
-# nodes$label <- NA
-nodes$locus <- D39V_targets$Locus.Tag[match(nodes$id, D39V_targets$sgRNA)]
-nodes$group <- D39V_targets$COGs[match(nodes$id, D39V_targets$sgRNA)]
-
-
-nodes[grepl("cps2A", nodes$label), "label"] <- "cps2A-N"
-nodes[grepl("cps2F", nodes$label), "label"] <- "cps2F-N"
-nodes[grepl("mltG", nodes$label), "label"] <- "greA,mpgA"
-nodes[grepl("orfX", nodes$label), "label"] <- "rocS"
-
-
-edges$COG <- paste0(D39V_targets$COGs[match(edges$from, D39V_targets$sgRNA)], ",", D39V_targets$COGs[match(edges$to, D39V_targets$sgRNA)])
-edges$length <- round((max(abs(edges$epsilonSum))-abs(edges$epsilonSum) + 1) * 25)
-# edges$color.opacity <- (abs(edges$epsilonSum)-min(abs(edges$epsilonSum)))/(max(abs(edges$epsilonSum)) - min(abs(edges$epsilonSum)))
-edges$color.color <- ifelse(edges$Group=="Positive", "#00798c",
-                      ifelse(edges$Group == "Negative","#edae49", "#d1495b"))
-
-nodes %>%
-  apply(2, as.character) %>%
-  write.table("nodes.txt",quote = F, sep="\t", row.names=F)
-write.table(edges, "edges.txt", quote=F, sep="\t", row.names=F)
 ```
 
 
 # Exporting
 
 ```{r}
-tmp <- df_old_res_shr[-which(names(df_old_res_shr) %in% c("tot", "SG1.COGs", "SG2.COGs"))]
-write.csv(apply(tmp, 2, "as.character"), "20230808_res_t1.csv", quote = T)
-write.table(apply(tmp, 2, "as.character"), "20231011_res_t1.txt")
+tmp <- df_old_res_shr[-which(names(df_old_res_shr) %in% c("tot", "SG1.COGs", "targets", "SG2.COGs"))]
+
+#File too big for GitHub
+write.table(apply(tmp, 2, "as.character"), "Result_869x869.txt", quote=F, row.names = F)
+
+write.table(df_mini, "Result_14x1499.txt", quote=F, row.names=F)
 
 ```
 
