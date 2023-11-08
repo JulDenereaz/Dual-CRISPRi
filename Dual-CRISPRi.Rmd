@@ -1,0 +1,451 @@
+---
+title: "Dual sgRNA Library CRISPRi-Seq Analysis in D39V"
+author: "Julien Dénéréaz"
+date: "November, 2021"
+output: 
+  html_document: 
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+    number_sections: yes
+    theme: readable
+    highlight: tango
+    toc_depth: 5
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, cache=TRUE, tidy=TRUE, fig.align = "center")
+library(readxl)
+library(DESeq2)
+library(reshape2)
+library(ggpubr)
+library(visNetwork)
+library(ggplot2)
+library(RColorBrewer)
+library(ggrepel)
+library(UpSetR)
+library(plotly)
+library(genbankr)
+library(ggtext)
+library(writexl)
+library(knitr)
+library(dplyr)
+library(patchwork)
+library(tidyr)
+library(parallel)
+library(ggcorrplot)
+library(pheatmap)
+library(progress)
+library(pbapply)
+library(InteractiveComplexHeatmap)
+library(ggtree)
+library(ComplexHeatmap)
+library(shiny)
+library(ggbeeswarm)
+library(metap)
+library(stringr)
+library(genbankr)
+library(plyr)
+library(corrplot)
+library(circlize)
+library(scales)
+library(ggpmisc)
+library(gridExtra)
+library(htmlwidgets)
+library(circlize)
+library(gtools)
+library(dplyr)
+library(processx)
+library(umap)
+
+#sgRNA targets
+D39V_targets <- read.table("targets_operon_manual-curation_20220401.txt", header=T)[c(1,26,27)]
+colnames(D39V_targets) <- c("sgRNA", "Locus.Tag", "Gene.Name")
+D39V_targets$sgRNA <- paste0("sgRNA", as.numeric(gsub("sgRNA", "", D39V_targets$sgRNA)))
+D39V_targets_all <- read.table("targets_operon_manual-curation_20220401.txt", header=T)
+D39V_Cogs <- read_xlsx("D39V_eggNOG_addgeneinfo.xlsx")[c(2,25)]
+D39V_targets$COGs <- lapply(D39V_targets$Locus.Tag, function(operon) {
+  tmp <- strsplit(operon, ",")
+  cog <- c()
+  for (gene in tmp) {
+    g <- D39V_Cogs$COG.cat[match(gene, D39V_Cogs$locus_tag)]
+    g <- unlist(strsplit(g, ""))
+    if(length(g) == 0) {
+      g <- NA
+    }
+    cog <- c(cog, g)
+  }
+  return(paste(cog, collapse = ","))
+})
+colnames(D39V_targets_all)[c(1,26,27)] <- c("sgRNA", "Locus.Tag", "Gene.Name")
+#Palette
+palette <- c( "#00798c","#66a182", "#edae49", "#d1495b")
+mapCOG <- read.table("mapCOG.txt", sep="\t") %>%
+  dplyr::rename(Abr=V1, Desc=V2)
+
+# m1, m2: the sample means
+# s1, s2: the sample standard deviations
+# n1, n2: the same sizes
+# m0: the null value for the difference in means to be tested for. Default is 0. 
+# equal.variance: whether or not to assume equal variance. Default is FALSE. 
+t.test2 <- function(m1,s1,m2,s2,n1=3,n2=3,m0=0,equal.variance=FALSE)
+{
+    if( equal.variance==FALSE ) 
+    {
+        se <- sqrt( (s1^2/n1) + (s2^2/n2) )
+        # welch-satterthwaite df
+        df <- ( (s1^2/n1 + s2^2/n2)^2 )/( (s1^2/n1)^2/(n1-1) + (s2^2/n2)^2/(n2-1) )
+    } else
+    {
+        # pooled standard deviation, scaled by the sample sizes
+        se <- sqrt( (1/n1 + 1/n2) * ((n1-1)*s1^2 + (n2-1)*s2^2)/(n1+n2-2) ) 
+        df <- n1+n2-2
+    }      
+    t <- (m1-m2-m0)/se 
+    dat <- c(m1-m2, se, t, 2*pt(-abs(t),df))    
+    names(dat) <- c("Difference of means", "Std Error", "t", "p-value")
+    return(dat[[4]]) 
+}
+
+
+
+
+```
+
+# Introduction
+
+This script analyses all of the Dual sgRNA CRISPRi libraries that was sequenced.The input is one formatted excel table, containing the read counts for each sgRNA combination in each condition.
+
+# Dual CRISPRi-Seq with 869x869 sgRNAs
+
+In total, 378'015 unique combinations
+
+## Input
+
+```{r input}
+raw869 <- read.csv2("raw869_NextSeq_NovaSeq.csv", sep=",", header=T, row.names=1)
+
+
+
+```
+
+
+## DESeq2
+
+```{r}
+
+
+#Adding together Lanes from Novaseq
+
+raw869_noLane <- melt(raw869) %>%
+  separate('variable', into=c("Sequencer", "Treatment", "Replicate", "Lane"), sep="[_]")
+
+
+
+raw869_noLane <- aggregate(.~SG1+SG2+Sequencer+Treatment+Replicate, raw869_noLane[-c(6)], sum)
+raw869_noLane <- dcast(raw869_noLane, SG1+SG2~Sequencer+Treatment+Replicate)
+
+raw869_ref <- raw869_noLane[raw869_noLane$SG1 == raw869_noLane$SG2,]
+raw869_comb <- raw869_noLane[raw869_noLane$SG1 != raw869_noLane$SG2,]
+
+
+raw869_colData <- data.frame(s=colnames(raw869_noLane[3:14]), row.names=colnames(raw869_noLane[3:14])) %>%
+  separate(col="s", into=c("Sequencer", "Treatment", "Repl"))
+
+
+
+row.names(raw869_comb) <- paste0(raw869_comb$SG1, "_", raw869_comb$SG2)
+row.names(raw869_ref) <- raw869_ref$SG1
+
+DDS_old <- DESeqDataSetFromMatrix(countData = raw869_comb[-c(1,2)],
+                                  colData = raw869_colData,
+                                  design = ~ Treatment + Sequencer) %>%
+  estimateSizeFactors()
+DDS_old_single <- DESeqDataSetFromMatrix(countData = raw869_ref[-c(1,2)],
+                                  colData = raw869_colData,
+                                  design = ~ Treatment + Sequencer) %>%
+  estimateSizeFactors()
+
+
+
+alpha <- 0.05
+LFCt <- 1
+
+DDS_old = DESeq(DDS_old)
+DDS_old_single = DESeq(DDS_old_single)
+
+
+DDS_old_res <- results(DDS_old, name = "Treatment_WithIPTG_vs_NoIPTG", lfcThreshold = LFCt, alpha = alpha)
+DDS_old_single_res <- results(DDS_old_single, name = "Treatment_WithIPTG_vs_NoIPTG", lfcThreshold = LFCt, alpha = alpha)
+
+
+df_old_res_shr <- as.data.frame(lfcShrink(DDS_old, res = DDS_old_res, type = "apeglm", coef = "Treatment_WithIPTG_vs_NoIPTG"))
+
+df_old_single_res_shr <- as.data.frame(lfcShrink(DDS_old_single, res = DDS_old_single_res, type = "apeglm", coef = "Treatment_WithIPTG_vs_NoIPTG"))
+df_old_single_res_shr$sgRNA <- row.names(df_old_single_res_shr)
+df_old_res_shr$sgRNA <- row.names(df_old_res_shr)
+df_old_res_shr <- separate(df_old_res_shr, 'sgRNA', into=c("SG1", "SG2"), sep="[_]", remove = T)
+
+df_old_res_shr$SG1.targets <- D39V_targets$Gene.Name[match(df_old_res_shr$SG1, D39V_targets$sgRNA)]
+df_old_res_shr$SG2.targets <- D39V_targets$Gene.Name[match(df_old_res_shr$SG2, D39V_targets$sgRNA)]
+
+
+df_old_res_shr$tot <- df_old_res_shr$SG1.refLog2FC + df_old_res_shr$SG2.refLog2FC
+
+
+
+df_old_res_shr$targets <- paste0(df_old_res_shr$SG1.targets, " | ", df_old_res_shr$SG2.targets)
+
+
+
+
+df_old_res_shr$SG1.refLog2FC <- df_old_single_res_shr$log2FoldChange[match(df_old_res_shr$SG1, df_old_single_res_shr$sgRNA)]
+df_old_res_shr$SG1.reflfcSE <- df_old_single_res_shr$lfcSE[match(df_old_res_shr$SG1, df_old_single_res_shr$sgRNA)]
+
+df_old_res_shr$SG1.refpadj <- df_old_single_res_shr$padj[match(df_old_res_shr$SG1, df_old_single_res_shr$sgRNA)]
+df_old_res_shr$SG2.refLog2FC <- df_old_single_res_shr$log2FoldChange[match(df_old_res_shr$SG2, df_old_single_res_shr$sgRNA)]
+df_old_res_shr$SG2.reflfcSE <- df_old_single_res_shr$lfcSE[match(df_old_res_shr$SG2, df_old_single_res_shr$sgRNA)]
+df_old_res_shr$SG2.refpadj <- df_old_single_res_shr$padj[match(df_old_res_shr$SG2, df_old_single_res_shr$sgRNA)]
+
+
+
+#E(Wxy) = Wx+Wy #better for negative calling
+df_old_res_shr <- transform(df_old_res_shr, expectedSum=SG1.refLog2FC+SG2.refLog2FC)
+
+
+
+
+
+
+
+#Score Epsilon:  ε = Wxy − E(Wxy) +- lfcSE
+df_old_res_shr <- df_old_res_shr %>% mutate(
+  epsilonSum = log2FoldChange-expectedSum
+)
+
+
+
+
+#hit calling
+tmp <- df_old_res_shr %>% mutate(
+  interactionSum = 
+    case_when(
+                       (epsilonSum < -1 & baseMean > 10 & padj < 0.05 & SG1.refLog2FC > -5 & SG2.refLog2FC > -5) ~ "Negative", 
+                       (epsilonSum > 1 & baseMean > 10 & padj > alpha) ~ "Positive",
+                       TRUE ~ "Neutral"
+                               )
+)
+  
+
+
+df_old_res_shr$Group <- factor(df_old_res_shr$interactionSum, levels=c("Positive", "Neutral", "Negative", "Synthetic Lethal"))
+
+df_old_res_shr$Group[which(df_old_res_shr$Group == "Negative" & df_old_res_shr$log2FoldChange < -7)] <- "Synthetic Lethal"
+
+df_old_res_shr <- df_old_res_shr %>%
+  mutate(pairs = case_when(
+    SG1.refpadj < alpha & SG2.refpadj < alpha ~ "E-E",
+    SG1.refpadj > alpha & SG2.refpadj > alpha ~ "NE-NE",
+    SG1.refpadj < alpha | SG2.refpadj < alpha ~ "NE-E"
+  )) 
+
+
+
+```
+
+# Mini Dual CRISPRi-Seq Analysis
+
+## Input
+
+```{r mini}
+sgRNAList <- c(
+  "sgRNA3","sgRNA348","sgRNA493","sgRNA593","sgRNA768",
+  "sgRNA785","sgRNA812","sgRNA932","sgRNA187","sgRNA294",
+  "sgRNA440","sgRNA500","sgRNA628","sgRNA758","sgRNA788",
+  "sgRNA870","sgRNA1029","sgRNA1357","sgRNA1500"
+)
+
+rawMini <- read.csv2("NovaSeq_rc_1-2-3Mis.csv", sep=",")
+rawMini <- rawMini[which(rawMini$SG1 %in% sgRNAList | rawMini$SG2 %in% sgRNAList),c(1,2,13:28)]
+
+colnames(rawMini) <- c("SG1", "SG2", paste(rep(c("NoIPTG", "WithIPTG"), each=8, times=1), rep(c(1,2,3,4), each=2, times=2), rep(c("L1", "L2"), each=1, times=8), sep="_"))
+
+rawMini <- separate(melt(rawMini), variable, into=c("Treatment", "Repl", "Lane"), sep="[_]")
+rawMini <- aggregate(.~SG1+SG2+Treatment+Repl, rawMini[-c(5)], sum)
+rawMini <- dcast(rawMini, SG1+SG2~Treatment+Repl)
+
+
+```
+
+## Formating input
+
+We are creating a formated dataframe, with 19 \* conditions columns
+
+```{r message=FALSE, cache=TRUE, list(width.cutoff=60), tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+
+
+rawMini_format <- data.frame(row.names=paste0("sgRNA", 1:1499))
+
+
+for(i in sgRNAList) {
+  rawMini_format[paste(i,colnames(rawMini[-c(1,2)]), sep="_")] <- 0
+}
+
+pbapply(rawMini, 1, function(row) {
+  v <- c()
+  if(row[[1]] %in% sgRNAList) {
+    v <- paste(row[[1]], colnames(rawMini[-c(1,2)]), sep="_")
+    for(colName in v) {
+      rawMini_format[row[[2]], colName] <<- as.numeric(row[[gsub(paste0(row[[1]], "_"), "", colName)]])
+    }
+  }
+  if(row[[2]] %in% sgRNAList) {
+    v <- paste(row[[2]], colnames(rawMini[-c(1,2)]), sep="_")
+    for(colName in v) {
+      rawMini_format[row[[1]], colName] <<- as.numeric(row[[gsub(paste0(row[[2]], "_"), "", colName)]])
+    }
+  }
+})
+rawMini_format[is.na(rawMini_format)] <- 0
+
+head(rawMini_format[1:4])
+
+```
+
+## Normalising
+
+We will normalize the counts of the singles combinations (sgRNA3 with sgRNA3)
+
+```{r message=FALSE, cache=TRUE, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+lapply(sgRNAList, function(sg) {
+  rawMini_format[sg, grepl(paste0(sg,"_"), colnames(rawMini_format))] <<- round(mean(as.numeric(rawMini_format[sg, !grepl(paste0(sg,"_"), colnames(rawMini_format))])))
+})
+rawMini_format[is.na(rawMini_format)] <- 0
+
+#Removing the last line, which is sgRNA1500 => luciferase. The line has read counts, which is basically inserted by the two algorithms above in the apply() and lapply() function.
+rawMini_format <- rawMini_format[1:1499,]
+
+head(rawMini_format[1:4])
+
+```
+
+## DDS object
+
+```{r cache=TRUE, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+
+coldataMini <- data.frame(s=colnames(rawMini_format), row.names=colnames(rawMini_format))
+coldataMini <- separate(coldataMini, col="s", into=c("Background", "Treatment", "Repl"))
+
+DDS_mini <- DESeqDataSetFromMatrix(countData = rawMini_format, 
+                                  colData = coldataMini, 
+                                  design = ~ Background * Treatment + Repl)
+
+DDS_mini <- estimateSizeFactors(DDS_mini)
+
+DDS_mini_norm <- counts(DDS_mini, normalized = TRUE)
+
+
+
+
+```
+
+## DESeq2
+
+```{r cache=TRUE, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+
+alpha = 0.05
+LFCt = 1
+#putting reference as sgRNA1500 (luciferase)
+DDS_mini$Background = relevel(DDS_mini$Background, ref="sgRNA1500")
+
+
+DDS_mini = DESeq(DDS_mini)
+resultsNames(DDS_mini)
+DDS_mini_res <- pblapply(paste0("Background", sgRNAList[1:18]), function(sg) {
+  st <- as.character(paste0(sg, ".TreatmentWithIPTG"))
+  res <- results(DDS_mini, lfcThreshold = LFCt, name=st)
+  res_shr <- as.data.frame(lfcShrink(DDS_mini, res = res, type = "apeglm", coef = st))
+  res_shr$sgRNA=row.names(res_shr)
+  return(res_shr)
+})
+names(DDS_mini_res) <- sgRNAList[1:18]
+
+
+df_mini <- bind_rows(DDS_mini_res, .id="Background")
+
+rawMini_refDF <- rawMini_format[grepl("sgRNA1500", colnames(rawMini_format))]
+
+DDS_mini_ref_colData <- data.frame(s=colnames(rawMini_refDF), row.names=colnames(rawMini_refDF))
+DDS_mini_ref_colData <- separate(DDS_mini_ref_colData, col="s", into=c("Background", "Treatment", "Repl"))[-c(1)]
+DDS_mini_ref <- DESeqDataSetFromMatrix(countData = rawMini_refDF,
+                                  colData = DDS_mini_ref_colData,
+                                  design = ~ Treatment + Repl)
+DDS_mini_ref <- estimateSizeFactors(DDS_mini_ref)
+DDS_mini_ref <- DESeq(DDS_mini_ref)
+resultsNames(DDS_mini_ref)
+DDS_mini_ref_res <- results(DDS_mini_ref, lfcThreshold = LFCt, name="Treatment_WithIPTG_vs_NoIPTG", alpha=alpha)
+df_mini_ref <- as.data.frame(lfcShrink(DDS_mini_ref, res = DDS_mini_ref_res, type = "apeglm", coef = "Treatment_WithIPTG_vs_NoIPTG"))
+df_mini_ref$sgRNA = row.names(df_mini_ref)
+df_mini_ref$targets <- D39V_targets$Gene.Name[match(df_mini_ref$sgRNA, D39V_targets$sgRNA)]
+
+df_mini$bg.targets <- D39V_targets$Gene.Name[match(df_mini$Background, D39V_targets$sgRNA)]
+df_mini$targets <- D39V_targets$Gene.Name[match(df_mini$sgRNA, D39V_targets$sgRNA)]
+
+
+
+
+
+```
+
+
+# Network for PneumoGIN
+
+```{r}
+
+edges <- df_old_res_shr %>%
+  select(c(epsilonSum, SG1, SG2, Group, targets)) %>%
+  filter(Group != "Neutral") %>%
+  # filter(!grepl("tarQ|gtrB|glmU|cps2O|trmB|lysS|prs2|divIVA|pulA|rpe|miaA", targets)) %>%
+  filter(epsilonSum > 1 | epsilonSum < -1) %>%
+  dplyr::rename(from = SG1) %>%
+  dplyr::rename(to = SG2)
+
+
+nodes <- data.frame(id=unique(c(as.character(edges$from), as.character(edges$to))))
+nodes$label <- D39V_targets$Gene.Name[match(nodes$id, D39V_targets$sgRNA)]
+# nodes$label <- NA
+nodes$locus <- D39V_targets$Locus.Tag[match(nodes$id, D39V_targets$sgRNA)]
+nodes$group <- D39V_targets$COGs[match(nodes$id, D39V_targets$sgRNA)]
+
+
+nodes[grepl("cps2A", nodes$label), "label"] <- "cps2A-N"
+nodes[grepl("cps2F", nodes$label), "label"] <- "cps2F-N"
+nodes[grepl("mltG", nodes$label), "label"] <- "greA,mpgA"
+nodes[grepl("orfX", nodes$label), "label"] <- "rocS"
+
+
+edges$COG <- paste0(D39V_targets$COGs[match(edges$from, D39V_targets$sgRNA)], ",", D39V_targets$COGs[match(edges$to, D39V_targets$sgRNA)])
+edges$length <- round((max(abs(edges$epsilonSum))-abs(edges$epsilonSum) + 1) * 25)
+# edges$color.opacity <- (abs(edges$epsilonSum)-min(abs(edges$epsilonSum)))/(max(abs(edges$epsilonSum)) - min(abs(edges$epsilonSum)))
+edges$color.color <- ifelse(edges$Group=="Positive", "#00798c",
+                      ifelse(edges$Group == "Negative","#edae49", "#d1495b"))
+
+nodes %>%
+  apply(2, as.character) %>%
+  write.table("nodes.txt",quote = F, sep="\t", row.names=F)
+write.table(edges, "edges.txt", quote=F, sep="\t", row.names=F)
+```
+
+
+# Exporting
+
+```{r}
+tmp <- df_old_res_shr[-which(names(df_old_res_shr) %in% c("tot", "SG1.COGs", "SG2.COGs"))]
+write.csv(apply(tmp, 2, "as.character"), "20230808_res_t1.csv", quote = T)
+write.table(apply(tmp, 2, "as.character"), "20231011_res_t1.txt")
+
+```
+
