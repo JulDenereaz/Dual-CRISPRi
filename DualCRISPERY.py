@@ -179,7 +179,7 @@ def getCombinations(f1, f2, guides):
 
 
 # %%
-dir = "./NextSeq"
+dir = "./Fastq"
 files = []
 guides = guides_loader("D39V_guides_869.csv")
 for i, filename in enumerate(os.listdir(dir)):
@@ -207,7 +207,7 @@ for obj in results:
     mats[obj[0]] = np.subtract(np.add(np.triu(obj[1]), np.tril(obj[1]).T), np.diag(np.diag(obj[1])))
 
 # %%
-with open("readCounts.csv", "w", encoding='UTF8', newline='') as f:
+with open("raw869_NextSeq_NovaSeq.csv", "w", encoding='UTF8', newline='') as f:
     ar = ["SG1", "SG2"]
     ar.extend([n for n in mats.keys()])
     csv.writer(f).writerow(ar)
