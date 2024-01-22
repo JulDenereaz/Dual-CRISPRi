@@ -198,6 +198,10 @@ df_old_single_res_shr <- as.data.frame(lfcShrink(DDS_old_single, res = DDS_old_s
 df_old_single_res_shr$sgRNA <- row.names(df_old_single_res_shr)
 df_old_res_shr$sgRNA <- row.names(df_old_res_shr)
 df_old_res_shr <- separate(df_old_res_shr, 'sgRNA', into=c("SG1", "SG2"), sep="[_]", remove = T)
+tmpAv <- cbind(raw869_comb[c(1,2)], rowMeans(raw869_comb[grepl("NoIPTG",  names(raw869_comb))]))
+df_old_res_shr$avReadsNI <- rowMeans(raw869_comb[grepl("NoIPTG",  names(raw869_comb))])
+df_old_res_shr$avReadsI <- rowMeans(raw869_comb[grepl("WithIPTG",  names(raw869_comb))])
+
 
 df_old_res_shr$SG1.targets <- D39V_targets$Gene.Name[match(df_old_res_shr$SG1, D39V_targets$sgRNA)]
 df_old_res_shr$SG2.targets <- D39V_targets$Gene.Name[match(df_old_res_shr$SG2, D39V_targets$sgRNA)]
@@ -219,40 +223,6 @@ df_old_res_shr$SG2.refLog2FC <- df_old_single_res_shr$log2FoldChange[match(df_ol
 df_old_res_shr$SG2.reflfcSE <- df_old_single_res_shr$lfcSE[match(df_old_res_shr$SG2, df_old_single_res_shr$sgRNA)]
 df_old_res_shr$SG2.refpadj <- df_old_single_res_shr$padj[match(df_old_res_shr$SG2, df_old_single_res_shr$sgRNA)]
 
-df_old_res_shr$tot <- df_old_res_shr$SG1.refLog2FC + df_old_res_shr$SG2.refLog2FC
-
-
-#E(Wxy) = Wx+Wy #better for negative calling
-df_old_res_shr <- transform(df_old_res_shr, expectedSum=SG1.refLog2FC+SG2.refLog2FC)
-
-
-
-
-
-
-#Score Epsilon:  ε = Wxy − E(Wxy) +- lfcSE
-df_old_res_shr <- df_old_res_shr %>% mutate(
-  epsilonSum = log2FoldChange-expectedSum
-)
-
-
-
-
-
-#hit calling
-df_old_res_shr <-df_old_res_shr %>% mutate(
-  interactionSum = 
-    case_when(
-                       (epsilonSum < -1 & padj < 0.05 & SG1.refLog2FC > -5 & SG2.refLog2FC > -5) ~ "Negative", 
-                       (epsilonSum > 1 & baseMean > 10 & padj > alpha) ~ "Positive",
-                       TRUE ~ "Neutral"
-                               )
-)
-
-
-df_old_res_shr$Group <- factor(df_old_res_shr$interactionSum, levels=c("Positive", "Neutral", "Negative", "Synthetic Lethal"))
-
-df_old_res_shr$Group[which(df_old_res_shr$Group == "Negative" & df_old_res_shr$log2FoldChange < -7)] <- "Synthetic Lethal"
 
 df_old_res_shr <- df_old_res_shr %>%
   mutate(pairs = case_when(
@@ -260,6 +230,60 @@ df_old_res_shr <- df_old_res_shr %>%
     SG1.refpadj > alpha & SG2.refpadj > alpha ~ "NE-NE",
     SG1.refpadj < alpha | SG2.refpadj < alpha ~ "NE-E"
   )) 
+
+
+df_old_res_shr <- transform(df_old_res_shr, expectedSum=SG1.refLog2FC+SG2.refLog2FC)
+
+
+
+
+
+df_old_res_shr$expectedReads <- df_old_res_shr$avReadsNI*2^df_old_res_shr$expectedSum
+
+#Score Epsilon:  ε = Wxy − E(Wxy)
+df_old_res_shr <- df_old_res_shr %>% mutate(
+  epsilonSum = ifelse(avReadsI < 4 & expectedReads < 2, NA, log2FoldChange-expectedSum)
+)
+
+
+
+df_old_res_shr <- df_old_res_shr %>% mutate(
+  bool = avReadsI < 4 & expectedReads < 2
+)
+
+df_old_res_shr <- df_old_res_shr %>% mutate(
+  interactionSum = 
+    case_when(
+      avReadsI < 4 & expectedReads < 2 ~ NA,
+      pairs == "NE-NE" ~ ifelse(epsilonSum < -1 & padj < 0.05, "Negative", "Neutral"),
+      pairs == "NE-E" & epsilonSum > 1.5 & baseMean > 10 ~"Positive",
+      pairs == "NE-E" & epsilonSum < -1 & padj < 0.05 ~ "Negative",
+      pairs == "E-E" & epsilonSum > 1.5 & baseMean > 10 ~"Positive",
+      pairs == "E-E" & epsilonSum < -1 & padj < 0.05 ~ "Negative",
+      TRUE ~ "Neutral"
+      
+    )
+)
+
+
+#hit calling
+# df_old_res_shr <-df_old_res_shr %>% mutate(
+# interactionSum = 
+#   case_when(
+#     (epsilonSum < -1 & padj < 0.05 & SG1.refLog2FC > -2 & SG2.refLog2FC > -2) ~ "Negative", 
+#     (epsilonSum > 1 & baseMean > 10 & padj > alpha) ~ "Positive",
+#     TRUE ~ "Neutral"
+#   )
+# )
+# table(df_old_res_shr[, c("interactionSum", "pairs")])
+
+
+
+
+df_old_res_shr$Group <- factor(df_old_res_shr$interactionSum, levels=c("Positive", "Neutral", "Negative", "Synthetic Lethal"))
+
+df_old_res_shr$Group[which(df_old_res_shr$Group == "Negative" & df_old_res_shr$log2FoldChange < -7)] <- "Synthetic Lethal"
+
 
 
 
